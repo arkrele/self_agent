@@ -2,7 +2,9 @@
 
 Step 1: score_arms()   —— 优势估计 + logit 修正
 Step 2: extract_arms() —— 从 Responses API 的 logprobs 里抽出 N 个候选臂的分布
+动作签名: action_sig() / parse_sig() —— (tool, args) 与匹配键之间的双向转换
 """
+import json
 
 # ---------------- 超参 ----------------
 N_ARMS        = 3      # 每轮提出几个候选动作
@@ -11,6 +13,52 @@ Z_MEM_PENALTY = 1.0    # 记忆注入臂相对"最差模型臂"再低多少个 l
 
 # 输出协议的哨兵词。提示词要求模型以 "CHOICE: <k>" 结尾，解析时按这个串定位。
 CHOICE_SENTINEL = "CHOICE"
+
+
+# ============ 动作签名： (tool, args) ⇄ 匹配键 ============
+
+def action_sig(tool: str, args: dict | None = None) -> str:
+    """把 (工具名, 参数) 规范化成一个**确定性且可逆**的匹配键。
+
+    这个串同时扮演两个角色：
+        · texts[arm_id] 的值      —— 交给 score_arms 做匹配
+        · 数据库里存的 action 字段 —— 检索结果的 q 的键
+    两边必须**逐字符相同**。否则同一语义的动作会被当成两个 arm 互相竞争，
+    记忆里的那个 arm 永远匹配不上模型的候选，Â 恒为 0，记忆静默失效。
+
+    **可逆是硬需求**：记忆注入臂的编号 > N_ARMS，没有对应的 LLM 候选可以查
+    （cands[arm_id-1] 会越界），只能从签名还原出 (tool, args) 才能真正执行。
+
+    三条实现约束：
+      · sort_keys=True  —— 字段顺序不同也得到同一个串
+      · 紧凑分隔符(',',':') —— 空白稳定，且比默认的 ", " / ": " 更短
+      · **不折叠空白**  —— run_bash 的 command 里连续空格是有意义的，
+                           "echo  a" 折叠成 "echo a" 会改变命令语义
+    """
+    name = tool.strip().lower()
+    payload = json.dumps(args or {}, sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":"))
+    return f"{name}({payload})"
+
+
+def parse_sig(sig: str):
+    """从签名还原 (tool, args)；解析不了返回 None。
+
+    记忆注入臂必须靠这个才能真正执行。返回 None 而不是抛异常，
+    是为了让调用方可以"跳过这条记忆"而不是整轮崩掉。
+    """
+    if not isinstance(sig, str):
+        return None
+    name, sep, rest = sig.partition("(")
+    if not sep or not rest.endswith(")"):
+        return None
+    try:
+        args = json.loads(rest[:-1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(args, dict):
+        return None
+    return name, args
 
 
 def score_arms(arm_lps: dict[int, float],
