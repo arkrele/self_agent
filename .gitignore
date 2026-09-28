@@ -1,0 +1,23 @@
+# ===== 密钥与本地配置 =====
+# .env 里有真实的 API_KEY，绝对不能提交
+.env
+.env.*
+!.env.example
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== JitRL 本地数据 =====
+# Milvus Lite 的本地库文件
+*.db
+*.db.lock
+jitrl_memory.json
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
