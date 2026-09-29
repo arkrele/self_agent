@@ -1,15 +1,26 @@
 """JitRL 的纯函数部分：不依赖网络、不依赖数据库，离线可反复验证。
 
-Step 1: score_arms()   —— 优势估计 + logit 修正
-Step 2: extract_arms() —— 从 Responses API 的 logprobs 里抽出 N 个候选臂的分布
-动作签名: action_sig() / parse_sig() —— (tool, args) 与匹配键之间的双向转换
+Step 1:   score_arms()       —— 优势估计 + logit 修正
+Step 2:   extract_arms()     —— 从 Responses API 的 logprobs 里抽出 N 个候选臂的分布
+动作签名: action_sig()/parse_sig() —— (tool, args) 与匹配键之间的双向转换
+Step 5a:  build_prompt()/parse_candidates() —— 提示词与候选解析（输出协议的两端）
+Step 5b:  step_completion()  —— 一次决策调用
+Step 3:   summarize_state()  —— 把"当前处境"压成会重复出现的 state 字符串
 """
 import json
+import re
+import hashlib
 
 # ---------------- 超参 ----------------
 N_ARMS        = 3      # 每轮提出几个候选动作
 BETA          = 3.0    # 优势强度，单位是"logprob 跨度的比例"（见 score_arms 注释）
 Z_MEM_PENALTY = 1.0    # 记忆注入臂相对"最差模型臂"再低多少个 logprob 跨度
+
+# ---------------- LLM 调用参数（全部实测钉死，见 step_completion 注释）----------------
+MODEL             = "deepseek-flash"
+TEMPERATURE       = 0.0    # 注意：实测该端点上报的 logprobs 与 temperature 无关
+TOP_LOGPROBS      = 20     # 给 3 会因备选名额被占导致 arm 缺失
+MAX_OUTPUT_TOKENS = 30000   # deepseek-flash 是推理模型，reasoning token 计入此上限
 
 # 输出协议的哨兵词。提示词要求模型以 "CHOICE: <k>" 结尾，解析时按这个串定位。
 CHOICE_SENTINEL = "CHOICE"
@@ -77,7 +88,9 @@ def score_arms(arm_lps: dict[int, float],
 
     返回 (scores, debug)
         scores : {arm_id: z'}              直接 max 就是最终选择
-        debug  : {V, A, span, injected}    供日志排查
+        debug  : {V, A, span, injected, texts}
+                 **texts 是增广后的**，用它（不要用传入的原始 texts）把
+                 win 的 arm_id 映射回动作签名 —— 否则 best 落在注入臂上时会 KeyError。
 
     两个关键决定：
 
@@ -117,7 +130,7 @@ def score_arms(arm_lps: dict[int, float],
                 nxt += 1
 
     if not q:
-        return z, {"V": 0.0, "A": {}, "span": span, "injected": []}
+        return z, {"V": 0.0, "A": {}, "span": span, "injected": [], "texts": t}
 
     # ③ Q̂ / V̂ / Â
     all_g = [g for gs in q.values() for g in gs]
@@ -128,7 +141,10 @@ def score_arms(arm_lps: dict[int, float],
     A = {a: x / scale for a, x in A.items()}        # 对称归一化，Â ∈ [-1, 1]
 
     scores = {i: z[i] + beta * A.get(t[i], 0.0) for i in z}
-    return scores, {"V": V, "A": A, "span": span, "injected": injected}
+    # debug 里必须带上**增广后**的 texts：记忆独有的动作会被注入成 id > n_arms 的新臂，
+    # 调用方只有拿到这个 dict 才能把 best 映射回动作签名。
+    # （只用原始 texts 会在 best 是注入臂时 KeyError。）
+    return scores, {"V": V, "A": A, "span": span, "injected": injected, "texts": t}
 
 
 # ============ Step 2：从 logprobs 里抽出 arm 分布 ============
@@ -229,3 +245,265 @@ def extract_arms(lps, n_arms: int = N_ARMS,
         return arm_lps, chosen, {"pos": i, "missing": missing, "found": sorted(found)}
 
     return None, None, {}
+
+
+# ============ Step 5a：输出协议（提示词 + 候选解析）============
+
+CANDIDATE_RE = re.compile(r"CANDIDATE\s*(\d+)\s*:")
+
+
+def _json_object_at(text: str, i: int):
+    """从 text[i] == '{' 开始，取一个**括号平衡**的 JSON 对象。
+
+    不能简单地用 find('}') —— args 里会有嵌套对象，字符串里也可能出现
+    '{' '}'。这里做最小可用的括号匹配（正确处理字符串字面量与转义）。
+    取不到返回 None。
+    """
+    depth, in_str, esc = 0, False, False
+    for j in range(i, len(text)):
+        c = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[i:j + 1]
+    return None
+
+
+def parse_candidates(text: str, n_arms: int = N_ARMS):
+    """从模型输出里解析出 N 个候选动作。
+
+    期望格式（由 build_prompt 指定）：
+        CANDIDATE 1: {"tool": ..., "args": {...}, "why": ...}
+        CANDIDATE 2: {...}
+        CANDIDATE 3: {...}
+        CHOICE: 2
+
+    返回 {arm_id: (tool, args)}；**任何一个解析不出来都返回 None**
+    （响亮失败，不猜、不补齐）—— arm_id 与候选的对应关系一旦错了，
+    后面 score_arms 的修正就作用到了错误的动作上。
+    """
+    out = {}
+    for m in CANDIDATE_RE.finditer(text or ""):
+        k = int(m.group(1))
+        if not (1 <= k <= n_arms) or k in out:
+            continue
+        j = m.end()
+        while j < len(text) and text[j] in " \t":
+            j += 1
+        if j >= len(text) or text[j] != "{":
+            continue                 # 正文里出现的 "CANDIDATE 1:"，不是真候选
+        raw = _json_object_at(text, j)
+        if raw is None:
+            return None
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        tool, args = obj.get("tool"), obj.get("args", {})
+        if not isinstance(tool, str) or not isinstance(args, dict):
+            return None
+        out[k] = (tool, args)
+    if set(out) != set(range(1, n_arms + 1)):
+        return None
+    return out
+
+
+def build_prompt(task: str, tools: str, records: str, observation: str,
+                 n_arms: int = N_ARMS, sentinel: str = CHOICE_SENTINEL) -> str:
+    """拼出决策用的提示词。
+
+    tools / records 由调用方渲染好后传进来（它们依赖 tools.py 和循环历史），
+    这样 jitrl.py 不需要知道工具长什么样。
+
+    输出协议的两个要点：
+      · 候选写成 CANDIDATE k: {...}，由 parse_candidates 解析
+      · 最后一行是哨兵 "CHOICE: <k>"，它是**单 token 的决策位置**，
+        extract_arms 靠它定位 logprobs
+    sentinel 与解析端共用同一个常量，改一处即可。
+    """
+    lines = "\n".join(
+        'CANDIDATE {i}: {{"tool": "工具名", "args": {{}}, "why": "为什么这步能推进任务"}}'.format(i=i)
+        for i in range(1, n_arms + 1)
+    )
+    return f"""<任务>
+{task}
+</任务>
+
+<可用工具>
+{tools}
+</可用工具>
+
+<已有操作记录>
+{records}
+</已有操作记录>
+
+<当前观察>
+{observation}
+</当前观察>
+
+请提出 {n_arms} 个**实质不同**的下一步动作，然后从中选出一个你认为最合适的。
+
+严格按下面格式输出，不要有任何多余内容：
+
+{lines}
+{sentinel}: <只填 1 到 {n_arms} 之间的整数，后面不要再有任何字符>
+
+要求：
+- 必须恰好 {n_arms} 个 CANDIDATE，彼此不能是同一个工具同一份参数
+- args 必须严格符合该工具的参数定义
+- {sentinel} 只能填 1 到 {n_arms} 之间的整数"""
+
+
+# ============ Step 5b：一次决策调用 ============
+
+class TruncatedResponse(RuntimeError):
+    """响应被 max_output_tokens 截断。
+
+    截断时**根本没有 output_text**，也就没有 logprobs。必须显式区分这种失败，
+    否则下游会以为"模型没输出"，排查方向完全跑偏。
+    """
+
+
+def step_completion(client, instructions: str, prompt: str,
+                    model: str = MODEL,
+                    temperature: float = TEMPERATURE,
+                    top_logprobs: int = TOP_LOGPROBS,
+                    max_output_tokens: int = MAX_OUTPUT_TOKENS):
+    """发起一次决策调用，返回 Responses API 的响应对象。
+
+    client 由调用方传入（依赖注入），所以 jitrl.py 不需要 import openai，
+    测试时也可以塞假 client。
+
+    下面四个参数都是**实测钉死**的，改动前请先读注释：
+
+      · include=["message.output_text.logprobs"]
+            拿到 token 级 logprobs 的唯一途径。注意只对 message 的
+            output_text 有效 —— reasoning item 的 reasoning_text 不在此列。
+
+      · top_logprobs=20
+            必须给足。给 3 时备选名额会被 <｜end▁of▁sentence｜> 之类的非数字
+            token 占掉，导致某个候选臂压根不出现（extract_arms 会用地板值补，
+            但那是补救，不是常态）。
+
+      · max_output_tokens=3000
+            deepseek-flash 是**推理模型**：它先输出 reasoning item，且 reasoning
+            token 计入这个上限。给 500 时会被推理吃光，返回 status=incomplete
+            且没有 output_text。
+
+      · **不要加** text={"format": ...}
+            实测结构化输出（json_schema）在这个端点上也能拿到 logprobs，
+            但纯文本 + 哨兵行（CHOICE: k）的协议更简单，也不依赖端点对
+            json_schema 的实现细节。
+
+    截断时抛 TruncatedResponse；其余异常原样抛出。
+    """
+    resp = client.responses.create(
+        model=model,
+        instructions=instructions,
+        input=prompt,
+        include=["message.output_text.logprobs"],
+        temperature=temperature,
+        top_logprobs=top_logprobs,
+        max_output_tokens=max_output_tokens,
+    )
+    if getattr(resp, "status", None) == "incomplete":
+        raise TruncatedResponse(
+            f"响应被截断: {getattr(resp, 'incomplete_details', None)}"
+            f"（max_output_tokens={max_output_tokens}，调大后重试）"
+        )
+    return resp
+
+
+# ============ Step 3：state 摘要器 ============
+
+# 结果分类的标记。故意做得粗 —— 它只用来拼 state，不参与打分，
+# 分类错了顶多让 state 粒度差一点，不会让决策出错。
+_ERR_MARKERS   = ("错误", "[error]", "traceback", "exception", "not found",
+                  "no such file", "failed", "失败", "permission denied")
+_EMPTY_MARKERS = ("未找到", "（空目录）", "(空", "无输出", "空目录")
+
+
+def outcome_class(result: str) -> str:
+    """把一次工具返回压成一个粗类别，供 summarize_state 拼 state 用。
+
+    工具执行失败会被 tools.run_tool 包成 "[ERROR] ..." 或 "xx 执行失败：..."，
+    这里只认几个稳定的标记，不试图理解结果内容。
+    """
+    s = (result or "").strip()
+    if not s:
+        return "empty"
+    low = s.lower()
+    if any(m in low for m in _ERR_MARKERS):
+        return "err"
+    if any(m in low for m in _EMPTY_MARKERS):
+        return "empty"
+    return "ok"
+
+
+def task_fingerprint(task: str, fp_len: int = 8) -> str:
+    """任务的短指纹（纯十六进制）。
+
+    用途有两个，必须来自同一个函数：
+      · 拼进 state 字符串的开头（便于人看）
+      · 作为数据库的 task 字段（检索时做**硬过滤**）
+
+    为什么任务要硬过滤而不是靠向量相似度：
+      实测发现 task 只在 state 里占 1 个 token，而工具/结果占 5~6 个 ——
+      结果"不同任务但活动相同"的余弦（0.92）反而高于"同任务但活动不同"（0.79）。
+      于是会召回别的任务的记忆，而那个 G 和本任务无关，直接污染 V̂ 基线。
+      任务不是"相似"关系，是"是不是同一个"的关系，必须精确匹配。
+    """
+    return hashlib.md5((task or "").strip().encode("utf-8")).hexdigest()[:fp_len]
+
+
+def summarize_state(history, recent: int = 2) -> str:
+    """把"当前处境"压成一个**会重复出现**的、确定性的 state 字符串。
+
+    history: [(tool, args, result), ...]，按时间顺序，**不含当前这一步**。
+
+    ⚠️ **state 里不含任务信息** —— 任务由数据库的 task 字段做硬过滤
+       （见 task_fingerprint / db.query_neighbors 的 task 参数）。
+       这是有意的，因为实测踩过一次坑：把 "task=xxxxxxxx | " 拼在 state 前面时，
+       它成了所有步共享的长前缀，把不同步骤的余弦抬到 0.61（> radius 0.5），
+       于是"第一步"和"读完文件"被当成同一个处境 —— 记忆直接让 agent
+       在第一步就输出 finish，什么都没做。
+
+    返回的串会同时用作两个地方：
+        · 写记忆时的 state  —— db.add_episode 的 steps 里的 state
+        · 查记忆时的 state  —— db.query_neighbors 的入参
+    两边必须是**同一个函数**的产物。换了摘要方式而只换一边，向量就落在
+    不同的分布里，从此再也召不回旧记忆 —— 而且不会报任何错。
+
+    为什么刻意做得这么粗：
+      检索依赖"同一处境在不同 episode 里重复出现"——同一条记忆被反复取到，
+      优势才有样本。任何**随步数增长**的成分（步数、时间戳、原始 observation）
+      都会让每条 state 独一无二 → 召回只有 1 条 → Â≡0 → 记忆静默失效，
+      而日志上只看得到"召回了 1 条"，不会报错。
+      所以只取"最近 recent 步的 (工具名, 结果类别)"——两者都是小集合。
+
+    ⚠️ 这是本项目里最需要按实际数据调的地方：
+        太细 → 召回为空或只有 1 条，Â≡0
+        太粗 → 召回一堆不相关的记忆，V̂ 基线失真（甚至让 agent 第一步就 finish）
+      判断依据是 db.query_neighbors() 的返回条数，**以及其中不同 action 的个数
+      （必须 ≥2，否则 Â≡0）**，不要靠感觉。
+
+    升级路径：换成 LLM 摘要（原 Jericho 的做法是让 LLM 生成
+    [PROGRESS]/[LOCATION]/[INVENTORY] 结构化摘要）。代价是每步多一次 LLM
+    调用，而且摘要本身带随机性。换的时候保证写入侧和查询侧用同一个新函数即可。
+    """
+    tail = history[-recent:] if recent > 0 else []
+    if not tail:
+        return "start"
+    return " → ".join(f"{tool}:{outcome_class(result)}" for tool, _, result in tail)

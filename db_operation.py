@@ -14,7 +14,7 @@ MAX_STATE_LEN = 1024   # 与 getSchema() 里 state 的 VARCHAR max_length 保持
 # 显式标注成 str（而不是让 Pylance 推断出 Literal[...]）：
 # list 是不变的，list[Literal['state']] 并不是 list[str] 的子类型，
 # 直接传给 Milvus 的 output_fields: List[str] 会报 reportArgumentType。
-_ENTITY_FIELDS: tuple[str, ...] = ("state","action","reward","g","episode_id","step_index")
+_ENTITY_FIELDS: tuple[str, ...] = ("state","action","reward","g","episode_id","step_index","task")
 
 # 检索默认要的字段（给 Milvus 的 output_fields）
 _OUTPUT_FIELDS: list[str] = list(_ENTITY_FIELDS)
@@ -38,6 +38,7 @@ class RecordModel(BaseModel):
     episode_id:int
     step_index:int
     done:bool
+    task:str = ""          # 任务指纹（纯十六进制），检索时做硬过滤
 
 class jitRL_DBParams(BaseModel):
     db_path:str
@@ -56,6 +57,7 @@ class Neighbor():
     similarity:float
     episode_id:int
     step_index:int
+    task:str = ""
 
 class jitRL_DBClass(object):
     def __init__(self,p:jitRL_DBParams):
@@ -104,6 +106,9 @@ class jitRL_DBClass(object):
         schema.add_field(field_name="episode_id",datatype=DataType.INT64)
         schema.add_field(field_name="step_index",datatype=DataType.INT64)
         schema.add_field("done",datatype=DataType.BOOL)
+        # 任务指纹。检索时用它做硬过滤：任务不是"相似"关系，是"是不是同一个"的关系。
+        # 靠向量相似度分不开（task 只占 state 的 1 个 token，会被工具/结果词稀释）。
+        schema.add_field("task",datatype=DataType.VARCHAR,max_length=64)
         return schema
     def getIndexParam(self):
         index_param=self._db_client.prepare_index_params()
@@ -153,6 +158,7 @@ class jitRL_DBClass(object):
     def add_episode(self,
                 episode_id: int,
                 steps: list[tuple[str, str, float]],
+                task: str,
                 gamma: float,
                 done: bool = True):
         """一个 episode 走完后批量落库，return-to-go 在这里算：
@@ -160,6 +166,9 @@ class jitRL_DBClass(object):
             G_t = Σ_{u≥t} γ^(u−t) · r_u
 
         steps: [(state_summary, action, reward), ...]，必须按时间顺序。
+        task:  任务指纹（jitrl.task_fingerprint），检索时按它硬过滤。
+               **故意不给默认值** —— 忘了传应当直接 TypeError，
+               而不是所有 episode 都落进同一个空桶、跨任务互相污染。
         ⚠️ gamma 在写入时固定，换 gamma 需要重刷数据。
         """
         n = len(steps)
@@ -183,6 +192,7 @@ class jitRL_DBClass(object):
                 episode_id=int(episode_id),
                 step_index=int(t),
                 done=bool(done and t == n - 1),   # 只有最后一条是 True
+                task=task,
                 # state_vec / action_vec 留 None，下面补
             ))
 
@@ -198,7 +208,8 @@ class jitRL_DBClass(object):
         )
         return len(records)
 
-    def query_neighbors(self,state:str,limit:int=50,radius:float=0.5)->list[Neighbor]:
+    def query_neighbors(self,state:str,limit:int=50,radius:float=0.5,
+                        task:str|None=None)->list[Neighbor]:
         """只按 state_vec 召回邻居，**不做任何动作过滤**。
 
         这是 JitRL 唯一需要的检索接口：
@@ -206,14 +217,22 @@ class jitRL_DBClass(object):
             V̂(s)   = mean{所有邻居的 G}      ← 基线必须看到全体邻居
         加了 action 过滤会让 V̂ 偏移甚至返回空。
 
+        task: 任务指纹。给了就**只在该任务的记忆里**检索（精确匹配 task 字段）。
+              建议总是给 —— 不同任务的 G 不可比，混在一起会污染 V̂ 基线。
+              注意任务不能靠向量相似度来分：实测 task 只占 state 的 1 个 token，
+              会被工具/结果词稀释，导致"不同任务但活动相同"的余弦反而更高。
+
         ⚠️ 入参 state 必须是**摘要**，且与 add_episode 写入时用的是同一个摘要函数。
            传原始 observation 会永远召回空 → Â≡0 → 记忆静默失效。
         """
+        if task and ('"' in task or "\\" in task):
+            raise ValueError(f"task 指纹含引号或反斜杠，会破坏 filter: {task!r}")
         res = self._db_client.search(
             collection_name=self.col_name,
             data=[self.get_embVector(state)],
             anns_field="state_vec",
             limit=limit,
+            filter=f'task == "{task}"' if task else "",
             search_params={
                 "metric_type": "COSINE",
                 # Milvus 对 COSINE 返回 radius < sim <= range_filter
@@ -247,6 +266,7 @@ class jitRL_DBClass(object):
             similarity=float(_hit_get(hit, "distance", 0.0) or 0.0),
             episode_id=int(pick("episode_id", -1)),
             step_index=int(pick("step_index", -1)),
+            task=str(pick("task", "")),
         )
 
     def query_record(self,state:str,action:str,

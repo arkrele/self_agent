@@ -96,8 +96,31 @@ TOOLS = [
             "required": ["pattern"],
         },
     },
-    
-    
+    {
+        "type": "function",
+        "name": "grep",
+        "description": "在文件**内容**里按正则搜索，返回匹配的「文件:行号:内容」。"
+        "当你知道要找什么关键字/符号、但不知道它在哪个文件哪一行时用这个；"
+        "只按文件名找文件请用 glob。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "正则表达式，例如 'def \\w+'、'TODO|FIXME'",
+                },
+                "include": {
+                    "type": "string",
+                    "description": "只搜匹配该通配符的文件，例如 '*.py'、'src/**/*.ts'。默认空表示搜全部文件",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "搜索的根目录，默认为当前目录",
+                },
+            },
+            "required": ["pattern"],
+        },
+    },
 ]
 
 read_files: set[str] = set()
@@ -211,7 +234,10 @@ def grep(pattern: str, include: str = "", path: str = ".") -> str:
             return f"grep 执行出错：{result.stderr.strip()}"
         return truncate_text(result.stdout.strip())
     except FileNotFoundError:
-        return "错误：未找到 ripgrep (rg)，请先安装：winget install BurntSushi.ripgrep"
+        # 包 id 已经拆成 .GNU / .MSVC 两个（旧的 BurntSushi.ripgrep 已失效）。
+        # 装完必须**重开终端**，PATH 才会生效。
+        return ("错误：未找到 ripgrep (rg)，请先安装："
+                "winget install BurntSushi.ripgrep.MSVC，装完重开终端")
     except subprocess.TimeoutExpired:
         return "错误：grep 搜索超时"
     except Exception as e:
