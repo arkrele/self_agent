@@ -17,6 +17,9 @@ def decision_maker(client:OpenAI,history:list,actions:list[Choice_Action]):
 
     resp=client.responses.create(
         model="deepseek-flash",
+        reasoning={
+            "effort":"none"
+        },
         instructions=decision_maker_prompt,
         input=new_history,
         top_logprobs=len(actions) if len(actions)<=20 else 20
@@ -44,7 +47,7 @@ if __name__=="__main__":
         api_key=os.environ["DEEPSEEK_API_KEY"]
     )    
     user_input="我想写一本百合小说，请给我一个方案"
-    option_num=5
+    option_num=10
     history=[]
     history.append({"role":"user","content":user_input})
     actions=choice_generator(client,history=history,option_num=option_num)
