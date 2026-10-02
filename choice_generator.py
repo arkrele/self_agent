@@ -22,7 +22,7 @@ class ChoiceSchema(BaseModel):
     actions:list[Choice_Action]    
 
 choice_generator_prompt="""
-你现在是一个子agent,为主agent提供输出选项,并且需要严格按照json格式输出
+你现在是一个子agent,为主agent提供输出选项,并且需要严格按照json格式输出，输出中不要体现你在为主agent提供方案，更不要出现方案的字眼
 你现在可用的工具有
     - read : 参数为path 路径
 返回选项个数要求:
@@ -51,6 +51,7 @@ def choice_generator(client:OpenAI,history:list,option_num:int)->list[Choice_Act
 
     actions="".join(actions)
     actions=json.loads(actions)
+    actions=[Choice_Action.model_validate(action) for action in actions["actions"]]
     return actions
 
 if __name__=="__main__":
