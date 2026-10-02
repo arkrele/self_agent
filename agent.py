@@ -157,8 +157,7 @@ def save_path(path: str) -> pathlib.Path:
     raise ValueError(f"{path} is not in {root},超出工作目录,拒绝访问")
 
 
-def agent_run(client: OpenAI, user_input: str, history: list,
-              system_prompt: str) -> None:
+def agent_run(client: OpenAI, user_input: str, history: list,system_prompt: str) -> None:
     """处理一轮用户输入：循环调用模型和工具，直到模型给出最终回答。
 
     history 由调用方持有并**跨轮次复用**，这里只往里追加、不新建 ——
@@ -247,6 +246,21 @@ def agent_run(client: OpenAI, user_input: str, history: list,
                 "call_id": fc["call_id"],
                 "output": result,
             })
+
+    plan_agent(history=history,client=client,system_prompt=system_prompt)
+def plan_agent(history:list,client:OpenAI,system_prompt)->None:
+    text_his:list[str]=[]
+    for his in history:
+        print(his)
+        if his.get("role")=="user":
+            text_his.append("role:user\n"+his.get("content")+"\n")
+        if his.get("type")=="message":
+            for item in his.get("content") or None:
+                if item.get("type")=="output_text":
+                    text_his.append("role:ai\n"+item.get("text")+"\n")
+
+            
+
 
 
 def main():
