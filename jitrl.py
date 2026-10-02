@@ -13,7 +13,7 @@ import hashlib
 
 # ---------------- 超参 ----------------
 N_ARMS        = 3      # 每轮提出几个候选动作
-BETA          = 3.0    # 优势强度，单位是"logprob 跨度的比例"（见 score_arms 注释）
+BETA          = 0.5    # 优势强度，单位是"logprob 跨度的比例"（见 score_arms 注释）
 Z_MEM_PENALTY = 1.0    # 记忆注入臂相对"最差模型臂"再低多少个 logprob 跨度
 
 # ---------------- LLM 调用参数（全部实测钉死，见 step_completion 注释）----------------
