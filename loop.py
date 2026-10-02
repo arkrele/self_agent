@@ -118,18 +118,35 @@ def aggregate_q(neighbors) -> dict:
     return dict(q)
 
 
-def placeholder_reward(tool: str, args: dict, result: str, records) -> float:
+def placeholder_reward(client:OpenAI,tool: str, args: dict, result: str, records) -> float:
     """【占位奖励】⚠️ 下一步会被 episode 末的 LLM 评估器替换。
 
     它只知道"这一步有没有报错"，**不知道"有没有推进任务"** —— coding agent
     没有环境 reward。所以用它只能验证机制（记忆能否翻转决策），学不到策略。
     """
-    r = 0.0
-    if jitrl.outcome_class(result) == "err":
-        r -= 1.0
-    sig = jitrl.action_sig(tool, args)
-    if sum(1 for t, a, _ in records if jitrl.action_sig(t, a) == sig) >= 2:
-        r -= 1.0                       # 原地打转
+    instruction="""
+    你是一个打分器,你需要根据tool,args,result三个参数为这次工具调用打分,
+    三个参数的含义如下
+        tool:调用的工具
+        args:传入的参数
+        result:工具返回的结果
+    输出约束：
+        只输出一个数字，范围为[-1,1]的整数，表示这次行为的分数
+    """
+    input=f"""
+        tools:{tool},
+        args:{args},
+        result:{result}
+    """
+    resp=client.responses.create(
+        model="deepseek-flash",
+        instructions=instruction,
+        input=input
+    )
+    print("-------------")
+    print("操作打分:",resp.output_text)
+    print("-------------")        
+    r=int(resp.output_text)
     return r
 
 
@@ -220,7 +237,7 @@ def run_episode(client, db, task: str, episode_id: int, verbose: bool = True,
         if verbose:
             print(f"  结果: {' '.join(str(result).split())[:200]}")
 
-        trace.append((state, sig, placeholder_reward(tool, args, result, records)))
+        trace.append((state, sig, placeholder_reward(client,tool, args, result, records)))
         records.append((tool, args, result))
     else:
         print(f"[!] 达到最大步数 {max_steps}")
