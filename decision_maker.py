@@ -46,7 +46,7 @@ if __name__=="__main__":
         base_url=os.environ["base_url"],
         api_key=os.environ["DEEPSEEK_API_KEY"]
     )    
-    user_input="我想写一本百合小说，请给我一个方案"
+    user_input="将hello world输出到test.txt中"
     option_num=10
     history=[]
     history.append({"role":"user","content":user_input})

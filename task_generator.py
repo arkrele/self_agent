@@ -1,15 +1,13 @@
 from openai import OpenAI
-from openai.types.responses import ToolParam
-from tools import TOOLS,run_tool
-from pydantic import BaseModel,ConfigDict,ValidationError
+from pydantic import BaseModel,ConfigDict,ValidationError,Field
 from colorama import Fore
 import os
 from dotenv import load_dotenv
+import json
 class ReadinessJudgment(BaseModel):
-    ready_to_conclude:bool
-    missing_info:str
-    confidence:float
-
+    ready_to_conclude:bool=Field(description="一个布尔值，表示是否收集到祖国的信息")
+    missing_info:str=Field(description="给用户的对话信息，进一步提问")
+    confidence:float=Field(description="表示对于成功生成用户需求的置信度(范围为[0,1],当confidence>0.8时将结束询问进入下一个阶段)")
     model_config=ConfigDict(extra="forbid")    
 
 collector_prompt="""
@@ -32,12 +30,13 @@ collector_prompt="""
 """
 
 compactor_prompt="""
-你是一个运行在用户终端的子agent
+你是一个需求总结器
 你的工作是根据历史记录提取并总结用户的需求
 
 工作方式：
     根据上下文进行总结,输出一个小于1024字符的字符串
-
+输出限制：
+    - 仅输出对历史记录的总结，不做任何工作
 """
 
 def compactor_llm(client:OpenAI,history:list)->str:
@@ -53,12 +52,17 @@ def compactor_llm(client:OpenAI,history:list)->str:
 #                if text.type=="output_text":
 #                    task.append(text.text)
     task=resp.output_text
+    print("=====已完成总结工作，用户需求如下=====")
     print(task)
+    history.append({
+        "role":"user",
+        "content":"用户需求总结:"+task
+    })
     return task
 
 
 
-def collector_llm(client:OpenAI,history:list,limit:int):
+def collector_llm(client:OpenAI,history:list,limit:int=500):
     """
         history是历史记录
         limit是问答上限
@@ -79,60 +83,55 @@ def collector_llm(client:OpenAI,history:list,limit:int):
         index=index+1
         print("---------------------")
 
-
-        if wrong_return==0:
-            try:
-                user_input=input()
-                history.append(
-                    {
-                        "role":"user",
-                        "content":user_input,
-                    }
-                )
-            except (EOFError, KeyboardInterrupt):
-                break
-            if not user_input or user_input.lower() == "exit":
-                print("用户已终止询问环节,即将进行task总结")
-                history.append(
-                    {
-                        "role":"user",
-                        "content":"用户已终止询问环节"
-                    }
-                )
-                break
-            print("---------------------")
-
-
-
         try:
-            response=client.responses.parse(
-                model="deepseek-flash",
-                instructions=collector_prompt,
-                input=history,
-                text_format=ReadinessJudgment,
-            )
-            resp=response.output_parsed
-
-
-            if resp.ready_to_conclude or resp.confidence>0.8:
+            user_input=input()
+            if user_input=="exit":
                 break
-            else :
-                print(resp.missing_info)
-                history.append(
-                    {
-                        "role":"assistant",
-                        "content":resp.missing_info
-                    }
-                )
-            wrong_return=0
-        except ValidationError:
             history.append(
                 {
                     "role":"user",
-                    "content":"返回的格式有误，请重试"
+                    "content":user_input,
                 }
             )
-            wrong_return=1
+        except (EOFError, KeyboardInterrupt):
+                break
+        if not user_input or user_input.lower() == "exit":
+            print("用户已终止询问环节,即将进行task总结")
+            history.append(
+                {
+                    "role":"user",
+                    "content":"用户已终止询问环节"
+                }
+            )
+            break
+        print("---------------------")
+        resp=client.responses.create(
+            model="deepseek-flash",
+            instructions=collector_prompt,
+            input=history,
+            text={
+                "format":{
+                    "type":"json_schema",
+                    "name":"choice_event",
+                    "strict":True,
+                    "schema":ReadinessJudgment.model_json_schema()
+                }
+            },
+            stream=True
+        )
+        reply=[]
+        for item in resp:
+            if item.type=="response.output_text.delta":
+                reply.append(item.delta)
+        reply="".join(reply)
+        history.append({"role":"assistant","content":reply})
+        reply=ReadinessJudgment.model_validate(json.loads(reply))
+        if reply.ready_to_conclude==1 or reply.confidence>0.8:
+            print("=====已收集到足够信息，即将进入下一阶段======") 
+            break
+        else :
+            print(reply.missing_info)
+
 if __name__=="__main__":
 
     load_dotenv()
