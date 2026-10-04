@@ -20,7 +20,6 @@ class Choice_Action(BaseModel):
     text:str=Field("",description="输出给用户的文本")
     tool_name:str=Field("",description="即将使用的工具")    
     tool_arg:str=Field("",description="工具使用的参数,以json格式返回，若格式错误会返回报错")
-    index:int=Field(description="该Action输出的顺序序号")
 
 class ChoiceSchema(BaseModel):
     actions:list[Choice_Action]    
@@ -29,6 +28,7 @@ choice_generator_prompt="""
 你现在是一个子agent,为主agent提供输出选项,并且需要严格按照json格式输出，输出中不要体现你在为主agent提供方案，更不要出现方案的字眼
 工具使用要求：
     通过文本直接传回调用的工具和工具参数，禁止通过funcion_call传回,且只能调用一个工具
+    只能使用通过tools传入的工具,目前工具为空
 返回选项个数要求:
 """
 
@@ -56,7 +56,7 @@ def choice_generator(client:OpenAI,history:list,option_num:int,tools:list)->list
 
    
     if not actions:
-        return "there is no more options"
+        return []
     actions="".join(actions)
     actions=json.loads(actions)
     actions=[Choice_Action.model_validate(action) for action in actions["actions"]]

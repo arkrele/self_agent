@@ -5,6 +5,7 @@ from toolsCall_node import toolcall
 from openai import OpenAI
 from dotenv import load_dotenv
 from tool_schema_class import ToolContext,Tool
+from state_generator import state_generator
 import os 
 load_dotenv()
 def loop(toolsDict:dict[str,Tool],ctx:ToolContext):
@@ -17,6 +18,7 @@ def loop(toolsDict:dict[str,Tool],ctx:ToolContext):
     task=compactor_llm(client=client,history=history)
 
     while True:
+        state=state_generator(history=history,client=client)
         agent_loop(history=history,toolsDict=toolsDict,client=client,ctx=ctx)
         print("-----------------")
         try:
@@ -37,7 +39,7 @@ def agent_loop(history:list,toolsDict:dict[str,Tool],client:OpenAI,ctx:ToolConte
         act_lp=decision_maker(client=client,history=history,actions=actions)
         act=actions[act_lp[0][0]]
         history.append({
-            "role":"assitant",
+            "role":"assistant",
             "content":act.model_dump_json()
         })
         if act.text:

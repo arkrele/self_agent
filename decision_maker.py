@@ -8,7 +8,7 @@ decision_maker_prompt="""
 你现在是一个决定者的角色，选项提供者已经为你提供了多个可执行选项，你需要根据上下文判断哪个是最优解
 
 输出要求：
-    - 只要一个阿拉伯数字（禁止输出其他字符）,表示最优解的index
+    - 只要一个阿拉伯数字（禁止输出其他字符）,表示选项列表数组的下标，下标从0开始
 """
 def decision_maker(client:OpenAI,history:list,actions:list[Choice_Action]):
     actions_str=[action.model_dump_json() for action in actions]
