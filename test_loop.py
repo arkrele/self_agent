@@ -6,6 +6,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from tool_schema_class import ToolContext,Tool
 from state_generator import state_generator
+from evaluator import evaluator
 import os 
 load_dotenv()
 def loop(toolsDict:dict[str,Tool],ctx:ToolContext):
@@ -16,10 +17,9 @@ def loop(toolsDict:dict[str,Tool],ctx:ToolContext):
     )
     collector_llm(client=client,history=history)
     task=compactor_llm(client=client,history=history)
-
+    s_a:list[tuple]=[]
     while True:
-        state=state_generator(history=history,client=client)
-        agent_loop(history=history,toolsDict=toolsDict,client=client,ctx=ctx)
+        s_a=s_a+agent_loop(history=history,toolsDict=toolsDict,client=client,ctx=ctx)
         print("-----------------")
         try:
             user_input=input()
@@ -31,10 +31,13 @@ def loop(toolsDict:dict[str,Tool],ctx:ToolContext):
             break
         print("-----------------")
         pass    
-        
+    evaluator(client=client,task=task,s_aList=s_a)
     pass
-def agent_loop(history:list,toolsDict:dict[str,Tool],client:OpenAI,ctx:ToolContext):
+def agent_loop(history:list,toolsDict:dict[str,Tool],client:OpenAI,ctx:ToolContext)->list[tuple]:
+
+    s_a:list[tuple]=[]
     while True:
+        state=state_generator(history=history,client=client)
         actions=choice_generator(client=client,history=history,option_num=5,tools=[])
         act_lp=decision_maker(client=client,history=history,actions=actions)
         act=actions[act_lp[0][0]]
@@ -42,10 +45,13 @@ def agent_loop(history:list,toolsDict:dict[str,Tool],client:OpenAI,ctx:ToolConte
             "role":"assistant",
             "content":act.model_dump_json()
         })
+
+        s_a.append((state,act))
+
         if act.text:
             print(act.text)
         if act.return_type=="no_tool":
-            return
+            break
         else:
             resp=toolcall(toolsDict=toolsDict,action=act,ctx=ctx)
             history.append(
@@ -54,6 +60,8 @@ def agent_loop(history:list,toolsDict:dict[str,Tool],client:OpenAI,ctx:ToolConte
                     "content":"工具结果: "+resp
                 }
             )
+
+    return s_a
 
 
 
