@@ -37,8 +37,7 @@ class RecordModel(BaseModel):
     action:str
     action_vec:Optional[list[float]]=None
     reward:float
-    g:float
-    done:bool
+    g:float 
     task:str = ""        #对用户任务的描述，是一个不超过1024字符的字符串  
     task_vec:Optional[list[float]]=None
 
@@ -96,7 +95,6 @@ class jitRL_DBClass(object):
         schema.add_field(field_name="action_vec",datatype=DataType.FLOAT_VECTOR,dim=self.p.emb_dim)
         schema.add_field(field_name="reward",datatype=DataType.DOUBLE)
         schema.add_field(field_name="g",datatype=DataType.DOUBLE)
-        schema.add_field("done",datatype=DataType.BOOL)
         schema.add_field("task",datatype=DataType.VARCHAR,max_length=1024)
         schema.add_field(field_name="task_vec",datatype=DataType.FLOAT_VECTOR,dim=self.p.emb_dim)
         #这里做了更改，task是一个对用户需求的总结字段，可以使用相似度进行检索
@@ -203,7 +201,7 @@ class jitRL_DBClass(object):
         Q=self._get_Q(actions=actions,id_filter=id_filter)
         A=[q-V for q in Q]
         return A
-    def _get_Q(self,actions:list,id_filter:str,limit:int = 10)->float:
+    def _get_Q(self,actions:list[str],id_filter:str,limit:int = 10)->float:
         if not actions:
             return []
         action_res=self._db_client.search(
@@ -244,7 +242,7 @@ class jitRL_DBClass(object):
                         action=record.action,
                         action_vec=self.get_embVector(record.action),
                         task=task,
-                        task=self.get_embVector(task),
+                        task_vec=self.get_embVector(task),
                         reward=record.reward,
                         g=record.reward*gama
                     )
