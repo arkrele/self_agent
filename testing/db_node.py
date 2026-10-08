@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from pydantic import BaseModel
 from typing import Optional
+from evaluator import SARturple
 
 load_dotenv()
 
@@ -19,6 +20,8 @@ _ENTITY_FIELDS: tuple[str, ...] = ("state","action","reward","g","episode_id","s
 # 检索默认要的字段（给 Milvus 的 output_fields）
 _OUTPUT_FIELDS: list[str] = list(_ENTITY_FIELDS)
 
+GAMMA=0.95
+#这个计算g的时候用的，之后可以考虑让用户自己设置
 
 def _hit_get(hit,name,default=None):
     """兼容不同 pymilvus 版本的 hit 取值方式：
@@ -35,8 +38,6 @@ class RecordModel(BaseModel):
     action_vec:Optional[list[float]]=None
     reward:float
     g:float
-    episode_id:int
-    step_index:int
     done:bool
     task:str = ""        #对用户任务的描述，是一个不超过1024字符的字符串  
     task_vec:Optional[list[float]]=None
@@ -95,8 +96,6 @@ class jitRL_DBClass(object):
         schema.add_field(field_name="action_vec",datatype=DataType.FLOAT_VECTOR,dim=self.p.emb_dim)
         schema.add_field(field_name="reward",datatype=DataType.DOUBLE)
         schema.add_field(field_name="g",datatype=DataType.DOUBLE)
-        schema.add_field(field_name="episode_id",datatype=DataType.INT64)
-        schema.add_field(field_name="step_index",datatype=DataType.INT64)
         schema.add_field("done",datatype=DataType.BOOL)
         schema.add_field("task",datatype=DataType.VARCHAR,max_length=1024)
         schema.add_field(field_name="task_vec",datatype=DataType.FLOAT_VECTOR,dim=self.p.emb_dim)
@@ -231,6 +230,35 @@ class jitRL_DBClass(object):
             Q.append(sum/len(hits))
 
         return Q
+    def add(self,s_a_r:list[SARturple],task:str):
+        if not s_a_r:
+            return "列表为空！！！" 
+        records:list[RecordModel]=[]
+        gama=1
+        try:
+            for i,record in enumerate(s_a_r):
+                records.append(
+                    RecordModel(
+                        state=record.state,
+                        state_vec=self.get_embVector(record.state),
+                        action=record.action,
+                        action_vec=self.get_embVector(record.action),
+                        task=task,
+                        task=self.get_embVector(task),
+                        reward=record.reward,
+                        g=record.reward*gama
+                    )
+                )
+                gama=gama*GAMMA
+            self._db_client.insert(
+                collection_name=self.col_name,
+                data=[r.model_dump() for r in records]
+            )
+            return f"=====add {len(records)} rocords====="
+        except Exception as e:
+            print(f"{type(e).__name__}:{e}")
+            return
+
             
 
 

@@ -8,6 +8,11 @@ class Reward(BaseModel):
 class EvalSchema(BaseModel):
     r:list[Reward]=Field(description="返回对(s,a)元组列表的打分")
 
+class SARturple(BaseModel):
+    state:str
+    action:str
+    reward:int 
+
 evaluator_prompt="""
 你是一个打分器，你的任务是给每次操作进行打分
 
@@ -82,7 +87,7 @@ def _normalize(raw:list[int], n:int)->list[float]:
     return [min(OUT_MAX, max(OUT_MIN, r)) for r in rewards]
 
 
-def evaluator(client:OpenAI,s_aList:list[tuple],task:str)->list[float]:
+def evaluator(client:OpenAI,s_aList:list[SARturple],task:str)->list[float]:
     """给一串 (state, action) 打分，返回**已归一化**的 list[float]，与 s_aList 一一对应。
 
     返回值的下标 n 对应 s_aList[n]，reward ∈ [-1, 1]。
@@ -91,7 +96,7 @@ def evaluator(client:OpenAI,s_aList:list[tuple],task:str)->list[float]:
     if not s_aList:
         return []
 
-    t_s_a=[f"task:{task},state:{s_a[0]},action:{s_a[1]}" for s_a in s_aList]
+    t_s_a=[f"task:{task},state:{s_a.state},action:{s_a.action}" for s_a in s_aList]
     t_s_a="\n".join(t_s_a)
     resp=client.responses.create(
         model="deepseek-flash",
@@ -134,5 +139,8 @@ def evaluator(client:OpenAI,s_aList:list[tuple],task:str)->list[float]:
     rewards=_normalize(raw, len(s_aList))
     print(f"[evaluator] 归一化后: {[round(r,3) for r in rewards]}")
 
-    return rewards
+    for i,reward in enumerate(rewards):
+        s_aList[i].reward=reward
+    
+    return s_aList
 

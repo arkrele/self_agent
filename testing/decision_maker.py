@@ -50,7 +50,7 @@ if __name__=="__main__":
     option_num=10
     history=[]
     history.append({"role":"user","content":user_input})
-    actions=choice_generator(client,history=history,option_num=option_num)
+    actions=choice_generator(client,history=history,option_num=option_num,tools=[])
    
     print(actions) 
     choice_logprob=decision_maker(client=client,history=history,actions=actions)

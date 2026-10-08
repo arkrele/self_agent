@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from tool_schema_class import ToolContext,Tool
 from state_generator import state_generator
 from evaluator import evaluator
+from evaluator import evaluator,SARturple
+from db_node import jitRL_DBClass,jitRL_DBParams
 import os 
 load_dotenv()
 def loop(toolsDict:dict[str,Tool],ctx:ToolContext):
@@ -17,7 +19,10 @@ def loop(toolsDict:dict[str,Tool],ctx:ToolContext):
     )
     collector_llm(client=client,history=history)
     task=compactor_llm(client=client,history=history)
-    s_a:list[tuple]=[]
+    s_a:list[SARturple]=[]
+
+
+
     while True:
         s_a=s_a+agent_loop(history=history,toolsDict=toolsDict,client=client,ctx=ctx)
         print("-----------------")
@@ -31,11 +36,13 @@ def loop(toolsDict:dict[str,Tool],ctx:ToolContext):
             break
         print("-----------------")
         pass    
-    evaluator(client=client,task=task,s_aList=s_a)
+    sar:list[SARturple]=evaluator(client,s_a,task)
+
     pass
+
 def agent_loop(history:list,toolsDict:dict[str,Tool],client:OpenAI,ctx:ToolContext)->list[tuple]:
 
-    s_a:list[tuple]=[]
+    s_a:list[SARturple]=[]
     while True:
         state=state_generator(history=history,client=client)
         actions=choice_generator(client=client,history=history,option_num=5,tools=[])
@@ -45,8 +52,11 @@ def agent_loop(history:list,toolsDict:dict[str,Tool],client:OpenAI,ctx:ToolConte
             "role":"assistant",
             "content":act.model_dump_json()
         })
-
-        s_a.append((state,act))
+        s_a.append(SARturple(
+            state=state,
+            action=act.model_dump_json(),
+            reward=0,
+        ))
 
         if act.text:
             print(act.text)
