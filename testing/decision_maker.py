@@ -20,7 +20,7 @@ def decision_maker(client:OpenAI,history:list,actions:list[Choice_Action]):
         reasoning={
             "effort":"none"
         },
-        instructions=decision_maker_prompt,
+        instructions=decision_maker_prompt+f"可选下标范围为0-{len(actions)-1}",
         input=new_history,
         top_logprobs=len(actions) if len(actions)<=20 else 20
     )

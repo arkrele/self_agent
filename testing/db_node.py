@@ -1,4 +1,4 @@
-from pymilvus import MilvusClient,DataType
+from pymilvus import MilvusClient,DataType,AnnSearchRequest,RRFRanker,Function,FunctionType
 from openai import OpenAI
 from dotenv import load_dotenv
 from dataclasses import dataclass
@@ -90,13 +90,28 @@ class jitRL_DBClass(object):
             auto_id=True
          )
         schema.add_field(field_name="state_vec",datatype=DataType.FLOAT_VECTOR,dim=self.p.emb_dim)
-        schema.add_field(field_name="state",datatype=DataType.VARCHAR,max_length=MAX_STATE_LEN)
+        schema.add_field(
+            field_name="state",
+            datatype=DataType.VARCHAR,
+            max_length=MAX_STATE_LEN,
+            enable_analyzer=True,
+            analyzer_params={"tokenizer": "jieba"},
+        )
         schema.add_field(field_name="action",datatype=DataType.VARCHAR,max_length=MAX_STATE_LEN)
         schema.add_field(field_name="action_vec",datatype=DataType.FLOAT_VECTOR,dim=self.p.emb_dim)
         schema.add_field(field_name="reward",datatype=DataType.DOUBLE)
         schema.add_field(field_name="g",datatype=DataType.DOUBLE)
         schema.add_field("task",datatype=DataType.VARCHAR,max_length=1024)
         schema.add_field(field_name="task_vec",datatype=DataType.FLOAT_VECTOR,dim=self.p.emb_dim)
+        schema.add_field(field_name="state_bm25",datatype=DataType.SPARSE_FLOAT_VECTOR) 
+        bm25_function=Function(
+            name="bm25",
+            function_type=FunctionType.BM25,
+            input_field_names=["state"],
+            output_field_names="state_bm25",
+        )
+        schema.add_function(bm25_function)
+
         #这里做了更改，task是一个对用户需求的总结字段，可以使用相似度进行检索
         return schema
     def getIndexParam(self):
@@ -104,6 +119,11 @@ class jitRL_DBClass(object):
         index_param.add_index(field_name="action_vec",index_type="AUTOINDEX",metric_type="COSINE")
         index_param.add_index(field_name="state_vec",index_type="AUTOINDEX",metric_type="COSINE")
         index_param.add_index(field_name="task_vec",index_type="AUTOINDEX",metric_type="COSINE")
+        index_param.add_index(
+            field_name="state_bm25",
+            index_type="SPARSE_INVERTED_INDEX", # 神秘小bug，好像必须这么写
+            metric_type="BM25"
+        )
         return index_param
     def get_embVector(self,text:str):
         if text in self.emb_cache:
@@ -165,22 +185,22 @@ class jitRL_DBClass(object):
             },
             output_fields=["state"]
         )
-        matched=[h for hits in task_res for h in hits ]
-        id_filter=self._generate_filter(matched) 
 
-        state_res=self._db_client.search(
-            collection_name=self.col_name,
-            data=[self.get_embVector(state)],
-            anns_field="state_vec",
-            limit=limit,
-            filter=id_filter,
-            search_params={
-                "metric_type":"COSINE",
-                "params":{"radius":0.8,"range_filter":1.0}
-            },
-            output_fields=["task","state","action","g"]
+
+        matched_ids=[h["id"] for hits in task_res for h in hits ]
+
+
+        state_res=self.hybrid_search(
+            dense_field="state_vec",
+            sparse_field="state_bm25",
+            text=state,
+            output_field=["state","action","g","reward"],
+            limit=limit*10
         )
-        return [h for hits in state_res for h in hits]
+
+        hitlist= [h for hits in state_res for h in hits if h["id"] in matched_ids]
+
+        return hitlist[:limit]
 
     def _get_V(self,neighborhood:list)->float:
         if not neighborhood:
@@ -257,7 +277,33 @@ class jitRL_DBClass(object):
             print(f"{type(e).__name__}:{e}")
             return
 
-            
+    def hybrid_search(self,dense_field:str,sparse_field:str,text:str,output_field:list[str],limit:int):
+        dense_req=AnnSearchRequest(
+            data=[self.get_embVector(text)],
+            anns_field=dense_field,
+            param={
+                "metric_type":"COSINE",
+                "params":{"radius":0.8,"range_filter":1.0}
+            },
+            limit=limit
+        )
+        sparse_req=AnnSearchRequest(
+            data=[text],
+            anns_field=sparse_field,
+            param={
+                "metric_type":"BM25"
+            },
+            limit=limit
+        )
+        ranker = RRFRanker(k=60)
+        result=self._db_client.hybrid_search(
+            collection_name=self.col_name,
+            reqs=[dense_req,sparse_req],
+            ranker=ranker,
+            limit=limit,
+            output_fields=output_field
+        )
+        return result
 
 
 
